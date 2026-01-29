@@ -1,0 +1,16 @@
+﻿Private Sub UserForm_Initialize()
+    Me.Caption = "CTRLC - Kopiuj Part Number"
+    CommandButton1.Caption = "KOPIUJ"
+    
+    ' Pozycjonowanie formularza przy starcie
+    Me.StartUpPosition = 0  ' 0 = Manual (pozycja ręczna)
+    Me.Left = 1505           ' pozycja od lewej krawędzi ekranu (w twipach: 1440 = 1 cal)
+    Me.Top = 34            ' pozycja od górnej krawędzi ekranu
+    
+    ' Alternatywnie, aby wyśrodkować:
+    ' Me.StartUpPosition = 2  ' 2 = CenterScreen (środek ekranu)
+End Sub
+
+Private Sub CommandButton1_Click()
+    Call CopyPartNumberAndName
+End Sub

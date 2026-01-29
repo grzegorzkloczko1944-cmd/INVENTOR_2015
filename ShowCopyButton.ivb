@@ -1,0 +1,185 @@
+﻿' ============================================
+' MAKRO VBA - COPY PART NUMBER + NAME
+' Inventor 2015
+' ============================================
+
+Public Sub ShowCopyButton()
+    ' To makro wywołujesz, aby pokazać formularz z przyciskiem
+    frmCopyPN.Show vbModeless
+End Sub
+
+Public Sub CopyPartNumberAndName()
+    On Error GoTo ErrorHandler
+    
+    Dim oDoc As Document
+    Set oDoc = ThisApplication.ActiveDocument
+    
+    If oDoc Is Nothing Then
+        MsgBox "Brak aktywnego dokumentu!", vbExclamation
+        Exit Sub
+    End If
+    
+    If oDoc.DocumentType <> kDrawingDocumentObject Then
+        MsgBox "To nie jest rysunek IDW!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim oDrawDoc As DrawingDocument
+    Set oDrawDoc = oDoc
+    
+    If oDrawDoc.ActiveSheet.DrawingViews.Count = 0 Then
+        MsgBox "Brak widoków na arkuszu!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim oView As DrawingView
+    Set oView = oDrawDoc.ActiveSheet.DrawingViews.Item(1)
+    
+    ' 3D model z pierwszego rzutu
+    Dim oModel As Document
+    Set oModel = oView.ReferencedDocumentDescriptor.ReferencedDocument
+    
+    ' --- PART NUMBER ---
+    Dim pn As String
+    pn = ""
+    
+    On Error Resume Next
+    pn = oModel.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value
+    On Error GoTo ErrorHandler
+    
+    If pn = "" Then pn = "NO-PN"
+    
+    ' --- NAME ---
+    Dim name As String
+    name = ""
+    
+    ' Próbuj Description
+    On Error Resume Next
+    name = oModel.PropertySets.Item("Design Tracking Properties").Item("Description").Value
+    On Error GoTo ErrorHandler
+    
+    ' Próbuj Title z Design Tracking
+    If name = "" Or IsNull(name) Or IsEmpty(name) Then
+        On Error Resume Next
+        name = oModel.PropertySets.Item("Design Tracking Properties").Item("Title").Value
+        On Error GoTo ErrorHandler
+    End If
+    
+    ' Próbuj Title z Summary Information
+    If name = "" Or IsNull(name) Or IsEmpty(name) Then
+        On Error Resume Next
+        name = oModel.PropertySets.Item("Inventor Summary Information").Item("Title").Value
+        On Error GoTo ErrorHandler
+    End If
+    
+    ' Próbuj Nazwa z User Defined
+    If name = "" Or IsNull(name) Or IsEmpty(name) Then
+        On Error Resume Next
+        name = oModel.PropertySets.Item("Inventor User Defined Properties").Item("Nazwa").Value
+        On Error GoTo ErrorHandler
+    End If
+    
+    ' DisplayName jako ostatnia deska ratunku
+    If name = "" Or IsNull(name) Or IsEmpty(name) Then
+        name = oModel.DisplayName
+    End If
+    
+    Dim text As String
+    text = pn & " " & name
+    
+    ' Kopiuj do schowka - natywna metoda VBA dla Unicode/polskich znaków
+    Dim DataObj As Object
+    Set DataObj = CreateObject("new:{1C3B4210-F441-11CE-B9EA-00AA006B1A69}")
+    DataObj.SetText text
+    DataObj.PutInClipboard
+    Set DataObj = Nothing
+    
+    ' POKAŻ POPUP Z WARTOŚCIĄ NA 10 SEKUND (informacyjny, bez potwierdzenia)
+    Call ShowPopupWithValue(text)
+    
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "Błąd: " & Err.Description & vbCrLf & "Numer: " & Err.Number, vbCritical, "Błąd"
+End Sub
+
+' ============================================
+' POPUP INFORMACYJNY - AUTOMATYCZNIE ZAMYKA SIĘ PO 10 SEK
+' ============================================
+Private Sub ShowPopupWithValue(ByVal copyText As String)
+    On Error Resume Next
+    
+    ' Utwórz tymczasowy PowerShell który pokaże okno WPF BEZ przycisku
+    Dim tempPS As String
+    tempPS = Environ("TEMP") & "\popup_temp.ps1"
+    
+    ' Zakoduj tekst do Base64 (dla zachowania polskich znaków)
+    Dim stream As Object
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 2 ' adTypeText
+    stream.Charset = "UTF-8"
+    stream.Open
+    stream.WriteText copyText
+    stream.Position = 0
+    stream.Type = 1 ' adTypeBinary
+    
+    Dim xmlDoc As Object
+    Set xmlDoc = CreateObject("MSXML2.DOMDocument")
+    Dim node As Object
+    Set node = xmlDoc.createElement("b64")
+    node.DataType = "bin.base64"
+    node.nodeTypedValue = stream.Read
+    stream.Close
+    Set stream = Nothing
+    
+    Dim base64Text As String
+    base64Text = node.text
+    Set node = Nothing
+    Set xmlDoc = Nothing
+    
+    ' Przygotuj skrypt PowerShell z dekodowaniem Base64
+    Dim psScript As String
+    psScript = "$bytes = [System.Convert]::FromBase64String('" & base64Text & "')" & vbCrLf
+    psScript = psScript & "$text = [System.Text.Encoding]::UTF8.GetString($bytes)" & vbCrLf
+    psScript = psScript & "Add-Type -AssemblyName PresentationFramework" & vbCrLf
+    psScript = psScript & "$window = New-Object System.Windows.Window" & vbCrLf
+    psScript = psScript & "$window.Title = 'Part Number + Nazwa'" & vbCrLf
+    psScript = psScript & "$window.Width = 300" & vbCrLf                           ' SZEROKOŚĆ OKNA (piksele)
+    psScript = psScript & "$window.Height = 100" & vbCrLf                          ' WYSOKOŚĆ OKNA (piksele)
+    psScript = psScript & "$window.WindowStartupLocation = 'Manual'" & vbCrLf
+    psScript = psScript & "$window.Left = 2200" & vbCrLf                             ' POZYCJA OD LEWEJ KRAWĘDZI EKRANU (piksele)
+    psScript = psScript & "$window.Top = 45" & vbCrLf                              ' POZYCJA OD GÓRNEJ KRAWĘDZI EKRANU (piksele)
+    psScript = psScript & "$window.ResizeMode = 'NoResize'" & vbCrLf
+    psScript = psScript & "$window.Topmost = $true" & vbCrLf
+    psScript = psScript & "$window.WindowStyle = 'ToolWindow'" & vbCrLf
+    psScript = psScript & "$textBlock = New-Object System.Windows.Controls.TextBlock" & vbCrLf
+    psScript = psScript & "$textBlock.Text = $text" & vbCrLf
+    psScript = psScript & "$textBlock.HorizontalAlignment = 'Center'" & vbCrLf
+    psScript = psScript & "$textBlock.VerticalAlignment = 'Center'" & vbCrLf
+    psScript = psScript & "$textBlock.TextAlignment = 'Center'" & vbCrLf
+    psScript = psScript & "$textBlock.FontSize = 14" & vbCrLf
+    psScript = psScript & "$window.Content = $textBlock" & vbCrLf
+    psScript = psScript & "$timer = New-Object System.Windows.Threading.DispatcherTimer" & vbCrLf
+    psScript = psScript & "$timer.Interval = [TimeSpan]::FromSeconds(10)" & vbCrLf
+    psScript = psScript & "$timer.Add_Tick({ $window.Close() })" & vbCrLf
+    psScript = psScript & "$timer.Start()" & vbCrLf
+    psScript = psScript & "$window.ShowDialog() | Out-Null" & vbCrLf
+    
+    ' Zapisz plik PowerShell (zwykły ASCII, bo Base64 to tylko ASCII)
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim ts As Object
+    Set ts = fso.CreateTextFile(tempPS, True)
+    ts.Write psScript
+    ts.Close
+    Set ts = Nothing
+    Set fso = Nothing
+    
+    ' Uruchom PowerShell w tle
+    Dim oShell As Object
+    Set oShell = CreateObject("WScript.Shell")
+    oShell.Run "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File " & Chr(34) & tempPS & Chr(34), 0, False
+    Set oShell = Nothing
+End Sub
+
+
