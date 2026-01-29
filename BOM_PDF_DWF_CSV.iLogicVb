@@ -1,0 +1,492 @@
+﻿'==========================================
+' OKNO OPCJI Z DUŻYMI PRZYCISKAMI (bez Font)
+'==========================================
+Imports System.Windows.Forms
+
+Dim f As New Form()
+f.Text = "Opcja zapisu"
+f.FormBorderStyle = FormBorderStyle.FixedDialog
+f.StartPosition = FormStartPosition.CenterScreen
+f.Width = 520     ' większe okno
+f.Height = 260
+f.ControlBox = False
+
+'Tekst
+Dim lbl As New Label()
+lbl.Text = "Wybierz sposób zapisu:"
+lbl.Left = 40 : lbl.Top = 25 : lbl.Width = 440
+f.Controls.Add(lbl)
+
+'--- przycisk Tylko IDW ---
+Dim btnIDW As New Button()
+btnIDW.Text = "Tylko IDW"
+btnIDW.Left = 50 : btnIDW.Top = 110
+btnIDW.Width = 180 : btnIDW.Height = 70
+btnIDW.DialogResult = DialogResult.No
+f.Controls.Add(btnIDW)
+
+'--- przycisk Pełny zapis ---
+Dim btnFull As New Button()
+btnFull.Text = "Pełny zapis"
+btnFull.Left = 280 : btnFull.Top = 110
+btnFull.Width = 180 : btnFull.Height = 70
+btnFull.DialogResult = DialogResult.Yes
+f.Controls.Add(btnFull)
+
+f.AcceptButton = btnFull   'ENTER = Pełny zapis
+f.CancelButton = btnIDW    'ESC = Tylko IDW
+
+Dim ans As DialogResult = f.ShowDialog()
+
+If ans = DialogResult.No Then
+    ' Użytkownik kliknął Tylko IDW → kończymy regułę
+    Return
+End If
+' Użytkownik kliknął Pełny zapis – reguła leci dalej
+'==========================================
+
+' ============================================================
+' 1) GENERUJ CODE128 BMP Z MODELU → PYTHON EXE
+' ============================================================
+
+Dim exePath As String = "C:\iLogic\BarCode198\Python_Barcode_Maker_ONEDIR\dist\barcode_make_BMP\barcode_make_BMP.exe"
+Dim tempFolder As String = "C:\iLogic\BarCode198\TEMP"
+
+Dim drwDoc As DrawingDocument = ThisApplication.ActiveDocument
+If drwDoc Is Nothing Or drwDoc.DocumentType <> kDrawingDocumentObject Then Return
+
+Dim sheet As Sheet = drwDoc.ActiveSheet
+
+If sheet.DrawingViews.Count = 0 Then
+    MessageBox.Show("Brak widoków na arkuszu!", "Insert_CODE128")
+    Return
+End If
+
+Dim view As DrawingView = sheet.DrawingViews.Item(1)
+Dim srcDoc As Document
+
+Try
+    srcDoc = view.ReferencedDocumentDescriptor.ReferencedDocument
+Catch
+    MessageBox.Show("Nie można pobrać pliku źródłowego widoku!", "Insert_CODE128")
+    Return
+End Try
+
+Dim code As String = ""
+
+Try
+    code = CStr(srcDoc.PropertySets("Design Tracking Properties").Item("Part Number").Value)
+Catch
+    code = ""
+End Try
+
+If String.IsNullOrWhiteSpace(code) Then
+    MessageBox.Show("Brak 'Part Number' w modelu!", "Insert_CODE128")
+    Return
+End If
+
+code = Trim(code)
+
+If Not System.IO.File.Exists(exePath) Then
+    MessageBox.Show("BRAK pliku EXE:" & vbCrLf & exePath, "Insert_CODE128")
+    Return
+End If
+
+If Not System.IO.Directory.Exists(tempFolder) Then
+    System.IO.Directory.CreateDirectory(tempFolder)
+End If
+
+Dim imgPath As String = System.IO.Path.Combine(tempFolder, code & ".bmp")
+
+' Usuń stary plik jeśli istnieje
+Try
+    If System.IO.File.Exists(imgPath) Then
+        System.IO.File.Delete(imgPath)
+        System.Threading.Thread.Sleep(100)
+    End If
+Catch
+End Try
+
+' Uruchom proces z czekaniem
+Dim psi As New System.Diagnostics.ProcessStartInfo
+psi.FileName = exePath
+psi.Arguments = """" & code & """"
+psi.UseShellExecute = False
+psi.CreateNoWindow = True
+psi.WindowStyle = ProcessWindowStyle.Hidden
+
+Dim proc As System.Diagnostics.Process = System.Diagnostics.Process.Start(psi)
+Dim timeoutSec As Integer = 3
+
+' Czekaj na zakończenie procesu
+If Not proc.WaitForExit(timeoutSec * 1000) Then
+    Try
+        proc.Kill()
+    Catch
+    End Try
+    MessageBox.Show("Timeout – proces generowania BMP przekroczył czas:" & vbCrLf & timeoutSec & " sekund", "Insert_CODE128")
+    Return
+End If
+
+proc.Dispose()
+
+' Upewnij się, że plik istnieje
+If Not System.IO.File.Exists(imgPath) Then
+    MessageBox.Show("BMP nie został wygenerowany:" & vbCrLf & imgPath, "Insert_CODE128")
+    Return
+End If
+
+' Czekaj aż plik będzie dostępny do odczytu
+Dim t0 As DateTime = DateTime.Now
+Dim fileReady As Boolean = False
+
+Do While (DateTime.Now - t0).TotalSeconds < 1
+    Try
+        Using fs As System.IO.FileStream = System.IO.File.Open(imgPath, IO.FileMode.Open, IO.FileAccess.Read, IO.FileShare.None)
+            fileReady = True
+        End Using
+        Exit Do
+    Catch
+        System.Threading.Thread.Sleep(50)
+    End Try
+Loop
+
+If Not fileReady Then
+    MessageBox.Show("Plik BMP nie jest gotowy do odczytu", "Insert_CODE128")
+    Return
+End If
+
+' Wstaw do TitleBlock
+Dim tb As TitleBlock = sheet.TitleBlock
+Dim tbDef As TitleBlockDefinition = tb.Definition
+
+Dim oSketch As DrawingSketch = Nothing
+
+' Try-Catch na Edit
+Try
+    tbDef.Edit(oSketch)
+Catch ex As Exception
+    MessageBox.Show("Błąd otwarcia TitleBlock:" & vbCrLf & ex.Message, "Insert_CODE128")
+    Return
+End Try
+
+Dim oTG As TransientGeometry = ThisApplication.TransientGeometry
+
+' Bezpieczne usuwanie starych obrazów
+Try
+    Dim imgCount As Integer = oSketch.SketchImages.Count
+    If imgCount > 0 Then
+        For i As Integer = imgCount To 1 Step -1
+            Try
+                oSketch.SketchImages.Item(i).Delete()
+            Catch
+                ' Ignoruj błędy pojedynczego obrazu
+            End Try
+        Next
+    End If
+Catch ex As Exception
+    ' Ignoruj błędy całkowite
+End Try
+
+Dim pt As Point2d = oTG.CreatePoint2d(0.5, 11)
+
+' Try-Catch na dodawanie obrazu
+Try
+    oSketch.SketchImages.Add(imgPath, pt)
+Catch ex As Exception
+    Try
+        tbDef.ExitEdit()
+    Catch
+    End Try
+    MessageBox.Show("Błąd dodawania obrazu:" & vbCrLf & ex.Message, "Insert_CODE128")
+    Return
+End Try
+
+' Exit Edit z obsługą błędów
+Try
+    tbDef.ExitEdit()
+    System.Threading.Thread.Sleep(100)
+Catch ex As Exception
+    MessageBox.Show("Błąd zamykania edycji:" & vbCrLf & ex.Message, "Insert_CODE128")
+    Return
+End Try
+
+' Wymuszenie aktualizacji
+Try
+    InventorVb.DocumentUpdate()
+    System.Threading.Thread.Sleep(100)
+Catch
+End Try
+
+' Usuń plik BMP
+Try
+    If System.IO.File.Exists(imgPath) Then
+        System.IO.File.Delete(imgPath)
+    End If
+Catch
+End Try
+
+' ============================================================
+' 2) EXPORT PDF + DWF + CSV
+' ============================================================
+
+Dim sFolder As String = System.IO.Path.GetDirectoryName(drwDoc.FullFileName)
+Dim sNameNoExt As String = System.IO.Path.GetFileNameWithoutExtension(drwDoc.FullFileName)
+
+Dim sPDF As String = System.IO.Path.Combine(sFolder, sNameNoExt & ".pdf")
+Dim sDWF As String = System.IO.Path.Combine(sFolder, sNameNoExt & ".dwf")
+Dim sCSV As String = System.IO.Path.Combine(sFolder, sNameNoExt & ".csv")
+
+Dim oContext As TranslationContext
+oContext = ThisApplication.TransientObjects.CreateTranslationContext
+oContext.Type = IOMechanismEnum.kFileBrowseIOMechanism
+
+Dim oOptions As NameValueMap
+oOptions = ThisApplication.TransientObjects.CreateNameValueMap
+
+Dim oData As DataMedium
+oData = ThisApplication.TransientObjects.CreateDataMedium
+
+' PDF
+Try
+    System.Windows.Forms.Application.DoEvents()
+    Dim oPDFAddIn As TranslatorAddIn
+    oPDFAddIn = ThisApplication.ApplicationAddIns.ItemById("{0AC6FD96-2F4D-42CE-8BE0-8AEA580399E4}")
+    If Not oPDFAddIn Is Nothing Then
+        oOptions.Clear()
+        oData.FileName = sPDF
+        System.Windows.Forms.Application.DoEvents()
+        oPDFAddIn.SaveCopyAs(drwDoc, oContext, oOptions, oData)
+        System.Windows.Forms.Application.DoEvents()
+    End If
+Catch ex As Exception
+    MessageBox.Show("Błąd eksportu PDF: " & ex.Message, "Export")
+End Try
+
+' DWF
+Try
+    System.Windows.Forms.Application.DoEvents()
+    Dim oDWFAddIn As TranslatorAddIn
+    oDWFAddIn = ThisApplication.ApplicationAddIns.ItemById("{0AC6FD95-2F4D-42CE-8BE0-8AEA580399E4}")
+    If Not oDWFAddIn Is Nothing Then
+        oOptions.Clear()
+        oData.FileName = sDWF
+        System.Windows.Forms.Application.DoEvents()
+        oDWFAddIn.SaveCopyAs(drwDoc, oContext, oOptions, oData)
+        System.Windows.Forms.Application.DoEvents()
+    End If
+Catch ex As Exception
+    MessageBox.Show("Błąd eksportu DWF: " & ex.Message, "Export")
+End Try
+
+
+
+' CSV (tylko widoczne)
+Dim oPL As PartsList = Nothing
+Dim oSheetX As Sheet
+
+For Each oSheetX In drwDoc.Sheets
+    If oSheetX.PartsLists.Count > 0 Then
+        oPL = oSheetX.PartsLists.Item(1)
+        Exit For
+    End If
+Next
+
+If Not oPL Is Nothing Then
+    Try
+        Dim colCount As Integer = oPL.PartsListColumns.Count
+        Dim rowCount As Integer = oPL.PartsListRows.Count
+
+        Dim sw As System.IO.StreamWriter = New System.IO.StreamWriter(sCSV, False, System.Text.Encoding.UTF8)
+
+        ' nagłówki
+        Dim j As Integer
+        Dim line As String = ""
+        For j = 1 To colCount
+            If j > 1 Then line &= ";"
+            Dim colTitle As String = oPL.PartsListColumns.Item(j).Title
+            If colTitle Is Nothing Then colTitle = ""
+            colTitle = colTitle.Replace("""", """""")
+            line &= """" & colTitle & """"
+        Next
+        sw.WriteLine(line)
+
+        ' dane
+        Dim i As Integer
+        For i = 1 To rowCount
+            Dim oRow As PartsListRow = oPL.PartsListRows.Item(i)
+            If oRow.Visible = False Then Continue For
+
+            line = ""
+            For j = 1 To colCount
+                If j > 1 Then line &= ";"
+                Dim cellVal As String = ""
+                Try
+                    Dim oCell As PartsListCell = oRow.Item(j)
+                    If Not oCell Is Nothing Then cellVal = CStr(oCell.Value)
+                Catch
+                    cellVal = ""
+                End Try
+
+                If cellVal Is Nothing Then cellVal = ""
+                cellVal = cellVal.Replace("""", """""")
+                line &= """" & cellVal & """"
+            Next
+            sw.WriteLine(line)
+        Next
+
+        sw.Close()
+    Catch ex As Exception
+        MessageBox.Show("Błąd eksportu CSV: " & ex.Message, "Export")
+    End Try
+End If
+
+
+
+' ============================================================
+' 3) FIRST_VIEW_REPORT (doklejony bez zmian)
+' ============================================================
+
+'============================
+' FIRST_VIEW_REPORT -> ONEDIR EXE
+'============================
+
+' Aktywny rysunek IDW
+Dim oDrawDoc As DrawingDocument = ThisApplication.ActiveDocument
+
+If oDrawDoc Is Nothing Then
+    MessageBox.Show("Brak aktywnego rysunku IDW.", "NUMER_NAZWA")
+    Return
+End If
+
+Dim oSheet As Sheet = oDrawDoc.ActiveSheet
+
+If oSheet.DrawingViews.Count = 0 Then
+    MessageBox.Show("Brak widoków na aktywnym arkuszu.", "NUMER_NAZWA")
+    Return
+End If
+
+' Pierwszy widok na arkuszu
+Dim oView As DrawingView = oSheet.DrawingViews.Item(1)
+Dim oRefDoc As Document = oView.ReferencedDocumentDescriptor.ReferencedDocument
+
+If oRefDoc Is Nothing Then
+    MessageBox.Show("Widok nie ma podpiętego dokumentu źródłowego.", "NUMER_NAZWA")
+    Return
+End If
+
+' Pełna ścieżka modelu
+Dim srcPath As String = oRefDoc.FullFileName
+
+'=====================================
+' iPROPERTIES – NUMER + NAZWA
+'=====================================
+
+Dim drawingNumber As String = ""
+Dim drawingName As String = ""
+
+' --- NUMER: Part Number ---
+Try
+    Dim dps As PropertySet = oRefDoc.PropertySets.Item("Design Tracking Properties")
+    drawingNumber = dps.Item("Part Number").Value
+Catch
+    drawingNumber = ""
+End Try
+
+' --- NAZWA: kolejno Description / Title / Project ---
+Try
+    Dim dps As PropertySet = oRefDoc.PropertySets.Item("Design Tracking Properties")
+    drawingName = dps.Item("Description").Value
+Catch
+    drawingName = ""
+End Try
+
+If drawingName = "" Then
+    Try
+        Dim sps As PropertySet = oRefDoc.PropertySets.Item("Inventor Summary Information")
+        drawingName = sps.Item("Title").Value
+    Catch
+    End Try
+End If
+
+If drawingName = "" Then
+    Try
+        Dim dps2 As PropertySet = oRefDoc.PropertySets.Item("Design Tracking Properties")
+        drawingName = dps2.Item("Project").Value
+    Catch
+    End Try
+End If
+
+If drawingName = "" Then
+    drawingName = System.IO.Path.GetFileNameWithoutExtension(srcPath)
+End If
+
+'=====================================
+' URUCHOM ONEDIR EXE (zakomentowane)
+'=====================================
+
+'Dim exeFirst As String = "C:\iLogic\FIRST_VIEW_REPORT\dist\FIRST_VIEW_REPORT\FIRST_VIEW_REPORT.exe"
+
+'Dim psi As New System.Diagnostics.ProcessStartInfo
+'psi.FileName = exeFirst
+'psi.Arguments = """" & srcPath & """" _
+'              & " """ & drawingNumber & """" _
+'              & " """ & drawingName & """"
+'psi.UseShellExecute = False
+'psi.CreateNoWindow = True
+
+'System.Diagnostics.Process.Start(psi)
+
+
+'Uruchomienie kolejnych reguł
+
+' ===== 1) Pierwsza reguła =====
+
+Dim rulePath1 As String = "C:\iLogic\BOM_PDF_DWF_CSV_CODE128_DXF_STP_STL_CTRLC_PLUS_1\DXF_STP_STL.iLogicVb"
+
+If System.IO.File.Exists(rulePath1) Then
+    Try
+        iLogicVb.RunExternalRule(rulePath1)
+    Catch ex As Exception
+        MessageBox.Show("Błąd w regule DXF_STP_STL: " & ex.Message)
+    End Try
+Else
+    MessageBox.Show("Brak pliku reguły: " & rulePath1)
+End If
+
+' ===== 2) Druga reguła =====
+
+Dim rulePath2 As String = "C:\iLogic\BOM_PDF_DWF_CSV_CODE128_DXF_STP_STL_CTRLC_PLUS_1\CTRLC_PLUS_1.iLogicVb"
+
+If System.IO.File.Exists(rulePath2) Then
+    Try
+        iLogicVb.RunExternalRule(rulePath2)
+    Catch ex As Exception
+        MessageBox.Show("Błąd w regule CTRLC_PLUS_1: " & ex.Message)
+    End Try
+Else
+    MessageBox.Show("Brak pliku reguły: " & rulePath2)
+End If
+
+' ===== WYMUSZENIE ODŚWIEŻENIA TABELI/BOM =====
+Try
+    Dim cm As Inventor.CommandManager
+    cm = ThisApplication.CommandManager
+
+    ' To otwiera okno tabeli BOM albo je uaktywnia (zależnie od stanu)
+    Dim bomDef As Inventor.ControlDefinition
+    bomDef = cm.ControlDefinitions.Item("DrawingBOMCmd")
+    bomDef.Execute()
+Catch ex As Exception
+    ' Ignoruj błąd jeśli BOM nie istnieje
+End Try
+
+' ===== ZAPISZ BEZ PYTANIA =====
+
+Try
+    Dim saveDef As Inventor.ControlDefinition
+    saveDef = ThisApplication.CommandManager.ControlDefinitions.Item("AppFileSaveCmd")
+    saveDef.Execute()    ' identyczne jak kliknięcie dyskietki
+Catch ex As Exception
+    MessageBox.Show("Auto-save nieudany: " & ex.Message)
+End Try

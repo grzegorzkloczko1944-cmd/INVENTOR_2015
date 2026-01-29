@@ -1,0 +1,494 @@
+﻿' ============================================
+' MAKRO VBA - PEŁNY ZAPIS IDW
+' Inventor 2015
+' ============================================
+' Konwersja z iLogic do VBA
+' ============================================
+
+Public Sub FullExportIDW()
+    On Error GoTo ErrorHandler
+    
+    ' ==========================================
+    ' OKNO OPCJI - Tylko IDW / Pełny zapis
+    ' ==========================================
+    
+    Dim answer As VbMsgBoxResult
+    answer = MsgBox("Wybierz sposób zapisu:" & vbCrLf & vbCrLf & _
+                    "YES = Pełny zapis (PDF, DWF, CSV, DXF, STP, STL)" & vbCrLf & _
+                    "NO = Tylko zapisz IDW", _
+                    vbYesNo + vbQuestion, "Opcja zapisu")
+    
+    If answer = vbNo Then
+        ' Tylko zapisz IDW i zakończ
+        ThisApplication.ActiveDocument.Save
+        Exit Sub
+    End If
+    
+    ' Sprawdź czy to rysunek IDW
+    If ThisApplication.ActiveDocument Is Nothing Then
+        MsgBox "Brak aktywnego dokumentu!", vbExclamation
+        Exit Sub
+    End If
+    
+    If ThisApplication.ActiveDocument.DocumentType <> kDrawingDocumentObject Then
+        MsgBox "To nie jest rysunek IDW!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim drwDoc As DrawingDocument
+    Set drwDoc = ThisApplication.ActiveDocument
+    
+    Dim sheet As sheet
+    Set sheet = drwDoc.ActiveSheet
+    
+    If sheet.DrawingViews.Count = 0 Then
+        MsgBox "Brak widoków na arkuszu!", vbExclamation
+        Exit Sub
+    End If
+    
+    DoEvents
+    
+    ' ============================================================
+    ' 1) GENERUJ CODE128 BMP Z MODELU
+    ' ============================================================
+    
+    Dim exePath As String
+    exePath = "C:\iLogic\BarCode198\Python_Barcode_Maker_ONEDIR\dist\barcode_make_BMP\barcode_make_BMP.exe"
+    Dim tempFolder As String
+    tempFolder = "C:\iLogic\BarCode198\TEMP"
+    
+    Dim view As DrawingView
+    Set view = sheet.DrawingViews.Item(1)
+    
+    Dim srcDoc As Document
+    On Error Resume Next
+    Set srcDoc = view.ReferencedDocumentDescriptor.ReferencedDocument
+    On Error GoTo ErrorHandler
+    
+    If srcDoc Is Nothing Then
+        MsgBox "Nie można pobrać pliku źródłowego widoku!", vbExclamation
+        Exit Sub
+    End If
+    
+    Dim code As String
+    code = ""
+    
+    On Error Resume Next
+    code = srcDoc.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value
+    On Error GoTo ErrorHandler
+    
+    If code = "" Then
+        MsgBox "Brak 'Part Number' w modelu!", vbExclamation
+        Exit Sub
+    End If
+    
+    code = Trim(code)
+    
+    ' Sprawdź czy istnieje EXE
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    If Not fso.FileExists(exePath) Then
+        MsgBox "BRAK pliku EXE:" & vbCrLf & exePath, vbExclamation
+        Exit Sub
+    End If
+    
+    If Not fso.FolderExists(tempFolder) Then
+        fso.CreateFolder tempFolder
+    End If
+    
+    ' Uruchom generator kodów kreskowych
+    Dim oShell As Object
+    Set oShell = CreateObject("WScript.Shell")
+    Dim cmd As String
+    cmd = """" & exePath & """ """ & code & """"
+    oShell.Run cmd, 0, True
+    Set oShell = Nothing
+    
+    Dim imgPath As String
+    imgPath = tempFolder & "\" & code & ".bmp"
+    
+    If Not fso.FileExists(imgPath) Then
+        MsgBox "BMP nie został wygenerowany:" & vbCrLf & imgPath, vbExclamation
+        Exit Sub
+    End If
+    
+    DoEvents
+    
+    ' Wstaw do TitleBlock
+    Dim tb As TitleBlock
+    Set tb = sheet.TitleBlock
+    
+    Dim tbDef As TitleBlockDefinition
+    Set tbDef = tb.Definition
+    
+    Dim oSketch As DrawingSketch
+    tbDef.Edit oSketch
+    
+    Dim oTG As TransientGeometry
+    Set oTG = ThisApplication.TransientGeometry
+    
+    ' Usuń stare obrazki
+    Do While oSketch.SketchImages.Count > 0
+        oSketch.SketchImages.Item(1).Delete
+    Loop
+    
+    ' Dodaj nowy obrazek
+    Dim pt As Point2d
+    Set pt = oTG.CreatePoint2d(0.5, 11)
+    oSketch.SketchImages.Add imgPath, pt
+    
+    tbDef.ExitEdit
+    drwDoc.Update
+    
+    ' Usuń tymczasowy plik
+    On Error Resume Next
+    fso.DeleteFile imgPath
+    On Error GoTo ErrorHandler
+    
+    DoEvents
+    
+    ' ============================================================
+    ' 2) EXPORT PDF + DWF + CSV
+    ' ============================================================
+    
+    Dim sFolder As String
+    sFolder = fso.GetParentFolderName(drwDoc.FullFileName)
+    
+    Dim sNameNoExt As String
+    sNameNoExt = fso.GetBaseName(drwDoc.FullFileName)
+    
+    Dim sPDF As String
+    sPDF = sFolder & "\" & sNameNoExt & ".pdf"
+    
+    Dim sDWF As String
+    sDWF = sFolder & "\" & sNameNoExt & ".dwf"
+    
+    Dim sCSV As String
+    sCSV = sFolder & "\" & sNameNoExt & ".csv"
+    
+    Dim oContext As TranslationContext
+    Set oContext = ThisApplication.TransientObjects.CreateTranslationContext
+    oContext.Type = kFileBrowseIOMechanism
+    
+    Dim oOptions As NameValueMap
+    Set oOptions = ThisApplication.TransientObjects.CreateNameValueMap
+    
+    Dim oData As DataMedium
+    Set oData = ThisApplication.TransientObjects.CreateDataMedium
+    
+    DoEvents
+    
+    ' PDF
+    Dim oPDFAddIn As TranslatorAddIn
+    Set oPDFAddIn = ThisApplication.ApplicationAddIns.ItemById("{0AC6FD96-2F4D-42CE-8BE0-8AEA580399E4}")
+    
+    If Not oPDFAddIn Is Nothing Then
+        oOptions.Clear
+        oData.FileName = sPDF
+        oPDFAddIn.SaveCopyAs drwDoc, oContext, oOptions, oData
+    End If
+    
+    DoEvents
+    
+    ' DWF
+    Dim oDWFAddIn As TranslatorAddIn
+    Set oDWFAddIn = ThisApplication.ApplicationAddIns.ItemById("{0AC6FD95-2F4D-42CE-8BE0-8AEA580399E4}")
+    
+    If Not oDWFAddIn Is Nothing Then
+        oOptions.Clear
+        oData.FileName = sDWF
+        oDWFAddIn.SaveCopyAs drwDoc, oContext, oOptions, oData
+    End If
+    
+    DoEvents
+    
+    ' CSV (tylko widoczne wiersze)
+    Dim oPL As PartsList
+    Set oPL = Nothing
+    
+    Dim oSheetX As sheet
+    For Each oSheetX In drwDoc.Sheets
+        If oSheetX.PartsLists.Count > 0 Then
+            Set oPL = oSheetX.PartsLists.Item(1)
+            Exit For
+        End If
+    Next
+    
+    If Not oPL Is Nothing Then
+        Dim colCount As Integer
+        colCount = oPL.PartsListColumns.Count
+        
+        Dim rowCount As Integer
+        rowCount = oPL.PartsListRows.Count
+        
+        Dim ts As Object
+        Set ts = fso.CreateTextFile(sCSV, True)
+        
+        ' Nagłówki
+        Dim j As Integer
+        Dim line As String
+        line = ""
+        
+        For j = 1 To colCount
+            If j > 1 Then line = line & ";"
+            Dim colTitle As String
+            colTitle = oPL.PartsListColumns.Item(j).Title
+            If IsEmpty(colTitle) Or IsNull(colTitle) Then colTitle = ""
+            colTitle = Replace(colTitle, """", """""")
+            line = line & """" & colTitle & """"
+        Next j
+        
+        ts.WriteLine line
+        
+        ' Dane
+        Dim i As Integer
+        For i = 1 To rowCount
+            Dim oRow As PartsListRow
+            Set oRow = oPL.PartsListRows.Item(i)
+            
+            If oRow.Visible Then
+                line = ""
+                For j = 1 To colCount
+                    If j > 1 Then line = line & ";"
+                    Dim cellVal As String
+                    cellVal = ""
+                    
+                    On Error Resume Next
+                    Dim oCell As PartsListCell
+                    Set oCell = oRow.Item(j)
+                    If Not oCell Is Nothing Then cellVal = CStr(oCell.Value)
+                    On Error GoTo ErrorHandler
+                    
+                    If IsEmpty(cellVal) Or IsNull(cellVal) Then cellVal = ""
+                    cellVal = Replace(cellVal, """", """""")
+                    line = line & """" & cellVal & """"
+                Next j
+                ts.WriteLine line
+            End If
+        Next i
+        
+        ts.Close
+        Set ts = Nothing
+    End If
+    
+    DoEvents
+    
+    ' ============================================================
+    ' DXF_STP_STL – Export formatów
+    ' ============================================================
+    
+    Dim oView2 As DrawingView
+    Set oView2 = sheet.DrawingViews.Item(1)
+    
+    Dim oRefDoc2 As Document
+    Set oRefDoc2 = oView2.ReferencedDocumentDescriptor.ReferencedDocument
+    
+    If Not oRefDoc2 Is Nothing Then
+        Dim drawingNumber2 As String
+        drawingNumber2 = ""
+        
+        Dim drawingName2 As String
+        drawingName2 = ""
+        
+        On Error Resume Next
+        drawingNumber2 = oRefDoc2.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value
+        On Error GoTo ErrorHandler
+        
+        On Error Resume Next
+        drawingName2 = oRefDoc2.PropertySets.Item("Design Tracking Properties").Item("Description").Value
+        On Error GoTo ErrorHandler
+        
+        If drawingName2 = "" Then
+            On Error Resume Next
+            drawingName2 = oRefDoc2.PropertySets.Item("Inventor Summary Information").Item("Title").Value
+            On Error GoTo ErrorHandler
+        End If
+        
+        If drawingName2 = "" Then
+            On Error Resume Next
+            drawingName2 = oRefDoc2.PropertySets.Item("Design Tracking Properties").Item("Title").Value
+            On Error GoTo ErrorHandler
+        End If
+        
+        If drawingName2 = "" Then
+            drawingName2 = fso.GetBaseName(oRefDoc2.FullFileName)
+        End If
+        
+        If drawingNumber2 <> "" Then
+            Dim last1 As String
+            last1 = Right(drawingNumber2, 1)
+            
+            Dim last2 As String
+            last2 = Right(drawingNumber2, 2)
+            
+            Dim hasLaser As Boolean
+            hasLaser = (last1 = "X" Or last2 = "XX")
+            
+            Dim mat As String
+            mat = ""
+            Dim thick As String
+            thick = ""
+            
+            If hasLaser Then
+                mat = InputBox("Materiał (np. 304, S235, PA6)", "LOGISTYKA", "")
+                If mat = "" Then
+                    hasLaser = False
+                Else
+                    thick = InputBox("Grubość (mm) – np. 2 lub 1,5", "LOGISTYKA", "")
+                    If thick = "" Then
+                        hasLaser = False
+                    End If
+                End If
+            End If
+            
+            Dim doSTP As Boolean
+            Dim stpAnswer As VbMsgBoxResult
+            stpAnswer = MsgBox("Eksportować STP z modelu 3D?", vbYesNo + vbQuestion + vbDefaultButton2, "LOGISTYKA")
+            doSTP = (stpAnswer = vbYes)
+            
+            Dim doSTL As Boolean
+            Dim stlAnswer As VbMsgBoxResult
+            stlAnswer = MsgBox("Eksportować STL z modelu 3D?", vbYesNo + vbQuestion + vbDefaultButton2, "LOGISTYKA")
+            doSTL = (stlAnswer = vbYes)
+            
+            Dim baseName As String
+            baseName = drawingNumber2 & " " & drawingName2
+            
+            Dim dxfName As String
+            dxfName = ""
+            If hasLaser Then
+                dxfName = sFolder & "\" & baseName & ", " & mat & " gr" & thick & "mm.dxf"
+            End If
+            
+            Dim stpName As String
+            stpName = sFolder & "\" & baseName & ".stp"
+            
+            Dim stlName As String
+            stlName = sFolder & "\" & baseName & ".stl"
+            
+            DoEvents
+            
+            ' DXF
+            If hasLaser And dxfName <> "" Then
+                On Error Resume Next
+                drwDoc.SaveAs dxfName, True
+                On Error GoTo ContinueAfterError
+ContinueAfterError:
+            End If
+            
+            ' STP
+            If doSTP Then
+                On Error Resume Next
+                oRefDoc2.SaveAs stpName, True
+                On Error GoTo ContinueAfterError2
+ContinueAfterError2:
+            End If
+            
+            DoEvents
+            
+            ' STL
+            If doSTL Then
+                On Error Resume Next
+                oRefDoc2.SaveAs stlName, True
+                On Error GoTo ContinueAfterError3
+ContinueAfterError3:
+            End If
+        End If
+    End If
+    
+    ' ============================================================
+    ' CTRLC_PLUS_1 – Copy Next Drawing Number
+    ' ============================================================
+    
+    DoEvents
+    
+    Dim pn As String
+    pn = ""
+    
+    On Error Resume Next
+    If sheet.DrawingViews.Count > 0 Then
+        pn = sheet.DrawingViews.Item(1).ReferencedDocumentDescriptor.ReferencedDocument.PropertySets.Item("Design Tracking Properties").Item("Part Number").Value
+    End If
+    On Error GoTo ErrorHandler
+    
+    pn = Trim(pn)
+    
+    If pn <> "" Then
+        Dim core As String
+        core = pn
+        
+        ' Usuń sufiks X/XX/Z/ZZ
+        If Right(core, 2) = "XX" Or Right(core, 2) = "ZZ" Then
+            core = Left(core, Len(core) - 2)
+        ElseIf Right(core, 1) = "X" Or Right(core, 1) = "Z" Then
+            core = Left(core, Len(core) - 1)
+        End If
+        
+        ' Rozdziel na część przed kropką i numer
+        Dim mainPart As String
+        mainPart = core
+        
+        Dim num As Integer
+        num = 0
+        
+        Dim dotPos As Integer
+        dotPos = InStrRev(core, ".")
+        
+        If dotPos > 0 Then
+            mainPart = Left(core, dotPos - 1)
+            Dim sNum As String
+            sNum = Mid(core, dotPos + 1)
+            
+            On Error Resume Next
+            num = CInt(sNum)
+            On Error GoTo ErrorHandler
+        End If
+        
+        ' Podnieś numer o jeden
+        num = num + 1
+        
+        Dim newNum As String
+        If num < 10 Then
+            newNum = "0" & CStr(num)
+        Else
+            newNum = CStr(num)
+        End If
+        
+        Dim nextPN As String
+        nextPN = mainPart & "." & newNum
+        
+        ' Do schowka
+        Dim tempFile As String
+        tempFile = Environ("TEMP") & "\invclip.txt"
+        
+        Set ts = fso.CreateTextFile(tempFile, True)
+        ts.Write nextPN
+        ts.Close
+        Set ts = Nothing
+        
+        Set oShell = CreateObject("WScript.Shell")
+        oShell.Run "cmd /c clip < """ & tempFile & """", 0, True
+        Set oShell = Nothing
+        
+        On Error Resume Next
+        fso.DeleteFile tempFile
+        On Error GoTo ErrorHandler
+    End If
+    
+    ' ===== ZAPISZ DOKUMENT =====
+    DoEvents
+    
+    On Error Resume Next
+    drwDoc.Save
+    On Error GoTo ErrorHandler
+    
+    Set fso = Nothing
+    
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "Błąd: " & Err.Description & vbCrLf & "Numer: " & Err.Number, vbCritical, "Błąd"
+End Sub
+
+
